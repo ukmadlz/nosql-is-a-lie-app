@@ -1,0 +1,113 @@
+
+#!/usr/bin/env bash
+# IBM SDK for Node.js Buildpack
+# Copyright 2014 the original author or authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Launches Node Inspector and restarts the runtime in debug mode.
+#
+# Usage: run
+#
+
+app_management_dir=$(cd `dirname $0`/../.. && pwd)
+handler_dir=$(cd `dirname $0` && pwd)
+bp_dir=$(cd `dirname $0`/../../.. && pwd)
+node="${app_management_dir}/node/bin/node"
+port=8790
+pidfile="${handler_dir}/inspector.pid"
+
+# We register 2 proxy URI prefixes: one at `/bluemix-debug/inspector/*` for the majority of
+# the Node Inspector UI, and a second to catch the errant XHR call to `/bluemix-debug/protocol.json`
+# made by the UI.
+declare -A proxy_entries=(
+    ['inspector']="bluemix-debug/inspector"
+    ['protocol']="bluemix-debug/protocol.json"
+)
+
+add_proxy_entries() {
+    for key in "${!proxy_entries[@]}"; do
+        prefix="${proxy_entries[$key]}"
+        config_entry="{\"type\": \"http-forward\", \"backend\": \"127.0.0.1:${port}\", \"host\": \"*\", \"uri_prefix\": \"${prefix}\"}"
+        echo "Adding proxy entry with: ${config_entry}"
+        ${app_management_dir}/scripts/add_proxy_entry "${key}" "${config_entry}"
+    done
+    # The proxyAgent ignores successive file change events for ~50ms, so wait a bit, then poke the config file
+    # to ensure all previous changes took effect.
+    sleep 0.200
+    touch ${app_management_dir}/bin/proxy.config
+}
+
+restart_runtime() {
+    if [ ! -f ${HOME}/runtime.pid ]; then
+        # proxyAgent has not started the runtime yet (unlikely but possible). Here, the user must wait for the runtime to
+        # start in normal mode, then "soft-restart" it, which will put it into debug mode, at which point Node Inspector can be used.
+        # TODO: add an API for setting the NODE_EXECUTABLE used by proxyAgent so this can be done automatically instead.
+        echo 'Runtime has not been started. Please wait for the runtime to start, then click \"Restart\"\
+              from the web UI to put it into debug mode.'
+    else
+        # Do not use the SIGUSR1 trick here, because in Node 0.12 it causes the runtime to block until the debugger connects.
+        # We want it to listen for a debug connection, but continue to run normally. So just restart with `--debug`
+        echo "Restarting the runtime in debug mode..."
+        # Note the assumption here that the runtime's port is $PORT + 1
+        APP_PORT=$(( $PORT + 1 ))
+        ${app_management_dir}/handlers/restart-app/run ${APP_PORT} no-break &
+    fi
+}
+
+# Only allow 1 copy of this script to run at a time
+scriptfile=$0
+exec 200<$scriptfile
+flock -n 200
+acquired_lock=$?
+if [ $acquired_lock -ne 0 ]; then
+    echo Already running $scriptfile.
+    exit 0
+fi
+
+pushd ${handler_dir} &>/dev/null
+if ! ../install-inspector/run
+then
+    exit 1
+fi
+
+# Force rebuild of node-inspector
+installed_node="$($bp_dir/vendor/node/bin/node -v)"
+expected_node=$(cat $handler_dir/node_modules/.node_version)
+if [[ "$installed_node" != "$expected_node" ]]; then
+    echo "Reinstalling native module 'node-inspector'..."
+    ( cd $handler_dir/node_modules/ && npm install node-inspector 2>/dev/null )
+fi
+
+# Check if inspector is already running
+if ${app_management_dir}/handlers/query-inspector/run ; then
+    pid=$(cat ${pidfile})
+    echo "Already running inspector (PID: $pid)."
+    exit 0
+fi
+
+echo Starting utility: inspector...
+node="$bp_dir/vendor/node/bin/node"
+cd $handler_dir
+debugport=5858
+$node server.js "${proxy_entries['inspector']}" $port $debugport &
+pid=$!
+echo "${pid}" > ${pidfile}
+
+add_proxy_entries
+
+# Sleep needed for error messages to show up when things crash
+sleep 0.5
+
+restart_runtime
+

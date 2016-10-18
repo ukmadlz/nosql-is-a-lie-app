@@ -1,0 +1,7 @@
+
+#!/usr/bin/env bash
+# Usage: install                 Install if necessary.
+handler_dir=$(cd `dirname $0` && pwd)/../start-strongpm
+install_helper=${handler_dir}/../../utils/install_helper
+
+${install_helper} "--dir=${handler_dir}" "--label=strongpm" "$1"

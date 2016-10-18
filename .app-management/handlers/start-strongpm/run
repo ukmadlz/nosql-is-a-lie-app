@@ -1,0 +1,76 @@
+
+#!/usr/bin/env bash
+# IBM SDK for Node.js Buildpack
+# Copyright 2014 the original author or authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# Only allow 1 copy of this script to run at a time
+scriptfile=$0
+exec 200<$scriptfile
+flock -n 200
+acquired_lock=$?
+if [ $acquired_lock -ne 0 ]; then
+    echo Already running $scriptfile.
+    exit 0
+fi
+
+app_management_dir=$(cd `dirname $0`/../.. && pwd)
+handler_dir=$(cd `dirname $0` && pwd)
+bp_dir=$(cd `dirname $0`/../../.. && pwd)
+node=$app_management_dir/node/bin/node
+npm=$app_management_dir/node/bin/npm
+jq=$app_management_dir/utils/jq
+
+pushd ${handler_dir} &>/dev/null
+if ! ../install-strongpm/run
+then
+    exit 1
+fi
+
+installed_node="$($bp_dir/vendor/node/bin/node -v)"
+expected_node=$(cat $handler_dir/node_modules/.node_version)
+
+# Force reinstall of strongpm dependencies 
+if [[ "$installed_node" != "$expected_node" ]]; then
+  echo "Reinstalling native module 'sqllite3'..."
+  cd $handler_dir/node_modules/strong-start/node_modules/strong-pm/node_modules/minkelite/ && npm install sqlite3 --build-from-source 2>/dev/null && cd -
+fi
+
+port=8701
+key=pm
+pidfile=${handler_dir}/strongpm.pid
+
+echo Starting utility: PM...
+$app_management_dir/handlers/start-strongpm/node_modules/strong-start/node_modules/strong-pm/bin/sl-pm.js --json-file-db -P $PORT &
+pid=$!
+echo "${pid}" > ${pidfile}
+
+# Give it a few seconds to start, to make sure it is available when we try to start the app
+sleep 4
+
+# Set the right ports
+APP_PORT=$(( $PORT + 1 ))
+$app_management_dir/handlers/start-strongpm/node_modules/strong-start/node_modules/strong-pm/bin/sl-pmctl.js create 1
+$app_management_dir/handlers/start-strongpm/node_modules/strong-start/node_modules/strong-pm/bin/sl-pmctl.js set-size 1 1
+$app_management_dir/handlers/start-strongpm/node_modules/strong-start/node_modules/strong-pm/bin/sl-pmctl.js \
+ env-set 1 VCAP_APP_PORT=$APP_PORT PORT=$APP_PORT
+
+app_name=$(echo $VCAP_APPLICATION | $jq -r ".application_name")
+config_entry="{\"type\": \"http-forward\", \"backend\": \"127.0.0.1:${port}\", \"host\": \"${app_name}-${key}\", \"relaxed_access\": true}"
+echo "Adding proxy entry with: ${config_entry}"
+${app_management_dir}/scripts/add_proxy_entry "${key}" "${config_entry}"
+
+${app_management_dir}/handlers/restart-app/run ${APP_PORT} no-break &
+
