@@ -21,7 +21,7 @@
   "homepage": "https://github.com/ukmadlz/nosql-is-a-lie-app#readme",
   "dependencies": {
     "cfenv": "^1.0.3",
-    "hapi": "^13.3.0",
+    "hapi": "^18.1.0",
     "inert": "^3.2.0",
     "jade": "^1.11.0",
     "pusher": "^1.2.1",
